@@ -9,22 +9,106 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(xtable)
+```
+##  Motivation et positionnement du projet
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r}
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/glass/glass.data"
+dest <- "glass.data"
+if(!file.exists(dest)) {
+  download.file(url, dest)
+}
 ```
 
-## Including Plots
+## Analyse descriptive
 
-You can also embed plots, for example:
+Le jeu de données comprend 11 variables et 214 individus correspondant à des verres :
+1. Id number: 1 to 214
+2. RI: refractive index
+3. Na: Sodium (unit measurement: weight percent in corresponding oxide, as are attributes 4-10)
+4. Mg: Magnesium
+5. Al: Aluminum
+6. Si: Silicon
+7. K: Potassium
+8. Ca: Calcium
+9. Ba: Barium
+10. Fe: Iron
+11. Type of glass: (class attribute)
+-- 1 building_windows_float_processed
+-- 2 building_windows_non_float_processed
+-- 3 vehicle_windows_float_processed
+-- 4 vehicle_windows_non_float_processed (none in this database)
+-- 5 containers
+-- 6 tableware
+-- 7 headlamps
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+La variable Id ne nous intéresse pas car elle ne correspond à aucune propriété du verre, nous ne la considérerons donc pas dans nos analyses. Nous avons également pris soin de définir "Type of glass" comme un caractère car, bien qu'elle prenne pour valeur un nombre, ce nombre ne sert qu'à représenter un type de verre.
+
+```{r}
+df <- read.csv("glass.data", header=FALSE, col.names=c("id", "ri", "na", "mg", "al", "si", "k", "ca", "ba", "fe", "class"), colClasses = c("integer", rep("numeric", 9), "character"))
+df <- subset(df, select=-c(id))
+classes <- c("building_windows_float_processed", "building_windows_non_float_processed", "vehicle_windows_float_processed", "containers", "tableware", "headlamps")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+summary(df)
+```
+Le summary permet de se faire une première idée générale du jeu de données. L'indice de réfraction varie très peu (entre 1.511 et 1.534)
+
+```{r}
+df2 <- df
+df2$si <- scale(df2$si)
+df2$na <- scale(df2$na)
+df2$ca <- scale(df2$ca)
+boxplot(subset(df2, select=-c(class)))
+```
+Selon les différentes classes
+
+```{r, fig.height=32, fig.width=16}
+require(reshape2)
+
+df2 <- melt(df ,  id.vars = 'class', variable.name = 'series')
+ggplot(df2, aes(class,value)) + geom_boxplot() + facet_grid(series ~ ., scales="free_y")
+```
+Pour les classes 1, 2, 3, 5, 6, 7 ba est très bas, pas de doute
+
+Pour tenter de mettre en évidence des liens entre des variables, on affiche les graphes d'une variable en fonction d'une autre.
+```{r}
+plot(df)
+```
+Sur la courbe de l'indice de refraction en fonction du pourcentage de calcium, les points semblent se concentrer autour d'une courbe, on peut faire l'hypothèse d'une proportionnalité entre ri et ca.
+
+Les graphiques sont parfois difficilement lisible et trouver des relations visuellement n'est pas forcément évident, on se propose d'appuyer (ou pas) nos hyptothèses précédentes en étudiant la matrice de corrélation :
+```{r}
+cor(subset(df, select=-c(class)))
+```
+La matrice montre de potentielles relations entre : ri et ca (proportionnel), 
+
+```{r}
+bp <- df %>% 
+  count(class) %>% 
+  arrange(desc(class)) %>%
+  mutate(prop = n / sum(df$n) * 100) %>%
+  mutate(ypos = cumsum(prop)- 0.5*prop) %>%
+  ggplot(aes(x="", y=prop, fill=class)) +
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start = 0) + 
+  scale_fill_brewer(palette = "Dark2", labels=classes) +
+  theme_void() +
+  geom_text(aes(y = ypos, label = n), color = "white", size=6)
+bp
+```
+La diagramme montre que les classes sont peu équitables, certaine sont beaucoup plus d'individus que d'autres. On a par exemple seulement 9 individus de type "tableware" alors qu'on en a 76 de type "building_windows_non_float_processed". Cela risque de compliquer la classification car en ayant peu d'individus d'une classe, il sera plus dur d'en extraire les caractéristiques essentielles.
+
+```{r}
+D <- dist(subset(df, select=-c(class)), method = "euclidean", diag = FALSE, upper = FALSE, p = 2)
+cord<-cmdscale(D, k=3)
+label<-attributes(cord)$dimnames[[1]]
+plot(cord[,1], cord[,3], type="n")
+text(cord[,1], cord[,3], c("bwf", "bwnf", "vwf", "c", "t", "h"))
+```
