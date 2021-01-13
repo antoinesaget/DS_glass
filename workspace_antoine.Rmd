@@ -7,24 +7,66 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+install.packages('Cairo')
+library('Cairo')
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
 ```
 
-## R Markdown
+# 1. Preparing the data
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+First, we download the dataset
+```{r}
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/glass/glass.data"
+dest <- "glass.data"
+if(!file.exists(dest)) {
+  download.file(url, dest)
+}
+```
+And create a dataframe from the dataset:
+```{r}
+df <- read.csv("glass.data", header=FALSE, col.names=c("id", "ri", "na", "mg", "al", "si", "k", "ca", "ba", "fe", "class"), colClasses = c("integer", rep("numeric", 9), "character"))
+df <- subset(df, select=-c(id))
+classes <- c("building_windows_float_processed", "building_windows_non_float_processed", "vehicle_windows_float_processed", "containers", "tableware", "headlamps")
+df
 ```
 
-## Including Plots
+First, let's take an overview of the dataset:
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+library(xtable)
+xtable(summary(df))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+plot(df)
+```
+```{r}
+cor(df)
+```
+```{r}
+bp <- df %>% 
+  count(class) %>% 
+  arrange(desc(class)) %>%
+  mutate(prop = n / sum(df$n) * 100) %>%
+  mutate(ypos = cumsum(prop)- 0.5*prop) %>%
+  ggplot(aes(x="", y=prop, fill=class)) +
+  geom_bar(width = 1, stat = "identity") + 
+  coord_polar("y", start = 0) + 
+  scale_fill_brewer(palette = "Dark2", labels=classes) +
+  theme_void() +
+  geom_text(aes(y = ypos, label = n), color = "white", size=6) +
+  labs(title = "Répartition des classes dans le dataset")
+bp
+```
+```{r}
+D=dist(subset(df, select=-c(class)), method="euclidean", diag=FALSE, upper=FALSE, p=2)
+plot(cmdscale(D, k=2))
+```
+```{r, fig.height=32, fig.width=16}
+require(reshape2)
+
+df2 <- melt(df ,  id.vars = 'class', variable.name = 'series')
+ggplot(df2, aes(class,value)) + geom_boxplot() + facet_grid(series ~ ., scales="free_y")
+```
