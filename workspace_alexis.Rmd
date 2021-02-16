@@ -14,8 +14,15 @@ library(ggplot2)
 library(RColorBrewer)
 library(dplyr)
 library(xtable)
+library(cluster)
+library(ggplotify)
+require(ggdendro)
+library(caret)
+require(rpart)
+require(rpart.plot)
+require(ipred)
 ```
-##  Motivation et positionnement du projet
+## I. Motivation et positionnement du projet
 
 ```{r}
 url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/glass/glass.data"
@@ -25,69 +32,26 @@ if(!file.exists(dest)) {
 }
 ```
 
-## Analyse descriptive
-
-Le jeu de données comprend 11 variables et 214 individus correspondant à des verres :
-1. Id number: 1 to 214
-2. RI: refractive index
-3. Na: Sodium (unit measurement: weight percent in corresponding oxide, as are attributes 4-10)
-4. Mg: Magnesium
-5. Al: Aluminum
-6. Si: Silicon
-7. K: Potassium
-8. Ca: Calcium
-9. Ba: Barium
-10. Fe: Iron
-11. Type of glass: (class attribute)
--- 1 building_windows_float_processed
--- 2 building_windows_non_float_processed
--- 3 vehicle_windows_float_processed
--- 4 vehicle_windows_non_float_processed (none in this database)
--- 5 containers
--- 6 tableware
--- 7 headlamps
-
-La variable Id ne nous intéresse pas car elle ne correspond à aucune propriété du verre, nous ne la considérerons donc pas dans nos analyses. Nous avons également pris soin de définir "Type of glass" comme un caractère car, bien qu'elle prenne pour valeur un nombre, ce nombre ne sert qu'à représenter un type de verre.
+## II. Analyse descriptive
 
 ```{r}
 df <- read.csv("glass.data", header=FALSE, col.names=c("id", "ri", "na", "mg", "al", "si", "k", "ca", "ba", "fe", "class"), colClasses = c("integer", rep("numeric", 9), "character"))
 df <- subset(df, select=-c(id))
+df$class[df$class == "1"]="building_windows_float_processed"
+df$class[df$class == "2"]="building_windows_non_float_processed"
+df$class[df$class == "3"]="vehicle_windows_float_processed"
+df$class[df$class == "5"]="containers"
+df$class[df$class == "6"]="tableware"
+df$class[df$class == "7"]="headlamps"
 classes <- c("building_windows_float_processed", "building_windows_non_float_processed", "vehicle_windows_float_processed", "containers", "tableware", "headlamps")
 ```
+
+### II.1 Aperçu général
 
 ```{r}
 summary(df)
 ```
-Le summary permet de se faire une première idée générale du jeu de données. L'indice de réfraction varie très peu (entre 1.511 et 1.534)
-
-```{r}
-df2 <- df
-df2$si <- scale(df2$si)
-df2$na <- scale(df2$na)
-df2$ca <- scale(df2$ca)
-boxplot(subset(df2, select=-c(class)))
-```
-Selon les différentes classes
-
-```{r, fig.height=32, fig.width=16}
-require(reshape2)
-
-df2 <- melt(df ,  id.vars = 'class', variable.name = 'series')
-ggplot(df2, aes(class,value)) + geom_boxplot() + facet_grid(series ~ ., scales="free_y")
-```
-Pour les classes 1, 2, 3, 5, 6, 7 ba est très bas, pas de doute
-
-Pour tenter de mettre en évidence des liens entre des variables, on affiche les graphes d'une variable en fonction d'une autre.
-```{r}
-plot(df)
-```
-Sur la courbe de l'indice de refraction en fonction du pourcentage de calcium, les points semblent se concentrer autour d'une courbe, on peut faire l'hypothèse d'une proportionnalité entre ri et ca.
-
-Les graphiques sont parfois difficilement lisible et trouver des relations visuellement n'est pas forcément évident, on se propose d'appuyer (ou pas) nos hyptothèses précédentes en étudiant la matrice de corrélation :
-```{r}
-cor(subset(df, select=-c(class)))
-```
-La matrice montre de potentielles relations entre : ri et ca (proportionnel), 
+### II.2 Distribution des variables
 
 ```{r}
 bp <- df %>% 
@@ -100,15 +64,330 @@ bp <- df %>%
   coord_polar("y", start = 0) + 
   scale_fill_brewer(palette = "Dark2", labels=classes) +
   theme_void() +
-  geom_text(aes(y = ypos, label = n), color = "white", size=6)
+  geom_text(aes(y = ypos, label = n), color = "white", size=6) +
+  ggtitle("Répartition des individus dans les classes") +
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave("RepartitionClasses_Fig1.png", plot = bp, width = 6, height = 5)
 bp
 ```
-La diagramme montre que les classes sont peu équitables, certaine sont beaucoup plus d'individus que d'autres. On a par exemple seulement 9 individus de type "tableware" alors qu'on en a 76 de type "building_windows_non_float_processed". Cela risque de compliquer la classification car en ayant peu d'individus d'une classe, il sera plus dur d'en extraire les caractéristiques essentielles.
+### II.3 Dépendances entre variables
+
+```{r, fig.height=32, fig.width=16}
+require(reshape2)
+
+df2 <- melt(df ,  id.vars = 'class', variable.name = 'series')
+bxplt <- ggplot(df2, aes(class,value)) + geom_boxplot() + facet_grid(series ~ ., scales="free_y")+ ggtitle("Boxplot des variables selon la classe")
+ggsave("BoxplotVarSelonClasse_Fig2.png", plot = bxplt, width = 13, height = 10)
+bxplt
+```
 
 ```{r}
-D <- dist(subset(df, select=-c(class)), method = "euclidean", diag = FALSE, upper = FALSE, p = 2)
-cord<-cmdscale(D, k=3)
-label<-attributes(cord)$dimnames[[1]]
-plot(cord[,1], cord[,3], type="n")
-text(cord[,1], cord[,3], c("bwf", "bwnf", "vwf", "c", "t", "h"))
+cor(subset(df, select=-c(class)))
+```
+
+## III. Classification non supervisée
+
+### III.1 Choix du nombre de clusters
+
+Coude kmeans :
+```{r}
+dfX <- subset(df, select = -c(class))
+coude<-NULL
+coude$x <- 2:8
+coude$y <- NULL
+for (k in coude$x) {
+  rg <- kmeans(dfX, k, iter.max = 25, nstart = 25)
+  val <- rg$tot.withinss / rg$totss
+  coude$y <- c(coude$y, val)
+}
+
+coudedf <- data.frame(x=coude$x, y=coude$y)
+
+coude_kmean <- ggplot(coudedf, aes(x,y)) + 
+  geom_line() +
+  geom_point(size=1) + 
+  labs(title = 'Evolution de la distance intra-classes en fonction du nombre de cluster\npour kmeans', x = 'Nombre de clusters', y = 'Distance intra-classes') + 
+  theme_minimal() + 
+  scale_x_continuous(n.breaks = 7, minor_breaks = NULL)
+
+coude_kmean
+ggsave('Coude_kmeans_Fig3a.png', plot = coude_kmean)
+```
+Coude PAM :
+```{r}
+asw<-NULL
+asw$x <- 2:8
+asw$y <- numeric(8)
+for (k in asw$x) {
+  asw$y[k]  <- pam(dfX, k) $ silinfo $ avg.width
+}
+k.best <- which.max(asw$y)
+cat("Silhouette-optimal number of clusters:", k.best, "\n")
+
+aswdf <- data.frame(x=asw$x, y=asw$y[2:8])
+
+pam_asw <- ggplot(aswdf, aes(x, y)) + 
+  geom_point(size=2) + 
+  labs(title = 'Evolution de la largeur silhouette moyenne en fonction du nombre de cluster\npour PAM', x = 'Nombre de clusters', y = 'Largeur silhouette moyenne') + 
+  theme_minimal() + 
+  scale_x_continuous(n.breaks = 7, minor_breaks = NULL)
+
+pam_asw
+ggsave('pam_asw_Fig3b.png', plot = pam_asw)
+```
+Dendrogramme CAH :
+```{r}
+D<-dist(dfX, method="euclidean", diag=FALSE, upper=FALSE, p=2)
+resuhist<-hclust(D, method="ward.D2")
+cah_dendrogram <- ggdendrogram(resuhist) +
+  labs(title = 'Dendrogramme après CAH avec la méthode ward.D2', x = 'Points de données', y = 'Hauteur') + 
+  theme_minimal() +
+  scale_x_continuous(minor_breaks = NULL, breaks = NULL) + 
+  scale_y_continuous(minor_breaks = NULL, breaks = NULL) + 
+  geom_hline(yintercept = 18, color = 'red') + 
+  geom_hline(yintercept = 14, color = 'blue') + 
+  geom_hline(yintercept = 26, color = 'green')
+
+cah_dendrogram
+ggsave('cah_dendrogram_Fig3c.png', plot = cah_dendrogram, width = 16, height = 8)
+```
+
+```{r}
+k=2
+res<-kmeans(dfX, k, nstart = 25, iter.max = 25)
+qualite<-res$betweenss/res$totss
+D<-dist(df_untyped)
+sil <- silhouette (res$cluster, D)
+#png(file=paste("Silhouette_kmeans", paste(k, "clusters_Fig4a.png", sep="_"), sep="_"))
+plot(sil, main=paste("Silhouette de kmeans pour", paste(k, "clusters", sep=" "), sep=" "))
+#dev.off()
+```
+
+```{r}
+k=3
+res<-kmeans(dfX, k, nstart = 25, iter.max = 25)
+qualite<-res$betweenss/res$totss
+D<-dist(df_untyped)
+sil <- silhouette (res$cluster, D)
+#png(file=paste("Silhouette_kmeans", paste(k, "clusters_Fig4b.png", sep="_"), sep="_"))
+plot(sil, main=paste("Silhouette de kmeans pour", paste(k, "clusters", sep=" "), sep=" "))
+#dev.off()
+```
+
+```{r}
+k=2
+D2<-dist(dfX)
+res2<-pam(D2, k)
+sil2 <- silhouette (res2$clustering, D2)
+#png(file=paste("Silhouette_PAM", paste(k, "clusters_Fig5a.png", sep="_"), sep="_"))
+plot(sil2, main=paste("Silhouette de PAM pour", paste(k, "clusters", sep=" "), sep=" "))
+#dev.off()
+```
+
+```{r}
+k=3
+D2<-dist(dfX)
+res2<-pam(D2, k)
+sil2 <- silhouette (res2$clustering, D2)
+#png(file=paste("Silhouette_PAM", paste(k, "clusters_Fig5b.png", sep="_"), sep="_"))
+plot(sil2, main=paste("Silhouette de PAM pour", paste(k, "clusters", sep=" "), sep=" "))
+#dev.off()
+```
+## III.2 Etude de la classification non superviśee pour 3 clusters
+
+```{r, fig.height=8, fig.width=12}
+k = 3
+res_kmeans <- kmeans(dfX, k, iter.max = 25, nstart = 25)
+res_pam <- pam(dfX, k)
+res_cah <- hclust(D, method="ward.D2")
+
+clusters_kmeans <- res_kmeans$cluster
+clusters_pam <- res_pam$clustering
+clusters_cah <- cutree(res_cah, k = k)
+
+point_in_common <- function(clustersA, clustersB, clustersC) {
+  res <- c()
+  for (i in 1:length(clustersA)) {
+    tmp <- 0
+    if (clustersA[i] == clustersB[i]) {
+      tmp <- tmp + 1
+    }
+    if (clustersA[i] == clustersC[i]) {
+      tmp <- tmp + 1
+    }
+    if (clustersB[i] == clustersC[i]) {
+      tmp <- tmp + 1
+    }
+    res <- c(res, tmp)
+  }
+  return(res)
+}
+
+rearange_cluster <- function(clusters, combination) {
+  res <- c()
+  for (i in 1:length(clusters)) {
+    res <- c(res, combination[,clusters[i]])  
+  }
+  return(res)
+}
+
+x <- 1:3
+combinations <- expand.grid(rep(list(x), 3))
+combinations <- combinations %>% filter(Var1 != Var2 & Var2 != Var3 & Var1 != Var3)
+
+max <- 0
+best_combination <- c(0, 0)
+for (i in 1:nrow(combinations)) {
+  for (j in 1:nrow(combinations)) {
+    clusters_pam_rearranged <- rearange_cluster(clusters_pam, combinations[i,])
+    clusters_cah_rearranged <- rearange_cluster(clusters_cah, combinations[j,])
+    val_for_given_combination <- sum(point_in_common(clusters_kmeans, clusters_pam_rearranged, clusters_cah_rearranged))
+    if (val_for_given_combination > max) {
+      print(max)
+      max <- val_for_given_combination
+      best_combination <- c(i, j)
+    }
+  }
+}
+
+clusters_pam_rearranged <- rearange_cluster(clusters_pam, combinations[best_combination[1],])
+clusters_cah_rearranged <- rearange_cluster(clusters_cah, combinations[best_combination[2],])
+npoints_in_common <- point_in_common(clusters_kmeans, clusters_pam_rearranged, clusters_cah_rearranged)
+print(npoints_in_common)
+
+res_cmdscale <- cmdscale(D, k = 2)
+cmdscaledf <- data.frame(x = res_cmdscale[,1], y = res_cmdscale[,2], npoints_in_common = as.character(npoints_in_common), clusters=as.character(clusters_pam_rearranged))
+
+colours <- RColorBrewer::brewer.pal(3, "Set1")
+
+npoints_in_common_plot <- ggplot(cmdscaledf, aes(x=x, y=y, colour=npoints_in_common, shape=clusters)) +
+  geom_point(stroke = 0.75) +
+  labs(title = '', x = '', y = '') + 
+  theme_minimal() + 
+  scale_color_manual(values = c('1'=colours[1], '3'=colours[3]), name = 'Accord entre les différents clustering fait avec kmeans, pam et cah', labels = c('désaccord', 'accord')) +
+  scale_shape_manual(values = c('1'=1, '2'=2, '3'=3), name = 'Cluster trouvés experimentalement par kmeans', labels = c('cluster 1', 'cluster 2', 'cluster 3'))
+
+npoints_in_common_plot
+ggsave('Agree_Disagree_Fig6.png', plot = npoints_in_common_plot, width = 12, height = 8)
+
+```
+
+```{r, fig.height=8, fig.width=12}
+df_super <- df %>% mutate(super_class = case_when(
+    class == "building_windows_float_processed" | class == "vehicle_windows_float_processed" ~ '0' ,
+    class == "building_windows_non_float_processed" ~ '1' ,
+    class == "containers" | class == "tableware" | class == "headlamps" ~ '2' ,
+  )
+)
+
+
+
+k = 3
+res_kmeans <- kmeans(dfX, k, iter.max = 25, nstart = 25)
+res_pam <- pam(dfX, k)
+res_cah <- hclust(D, method="ward.D2")
+
+# clusters <- res_kmeans$cluster
+# clusters <- res_pam$clustering
+clusters <- cutree(res_cah, k = 3)
+
+res_cmdscale <- cmdscale(D, k = 2)
+cmdscaledf <- data.frame(x = res_cmdscale[,1], y = res_cmdscale[,2], experiment = as.character(clusters), hypothesis=df_super$super_class)
+
+hypothesis_experiment_cmdscale <- ggplot(cmdscaledf, aes(x=x, y=y, shape=hypothesis, colour=experiment)) +
+  geom_point(stroke = 0.75) +
+  labs(title = 'Analyses 2D des coordonnées principales de nos datapoints montrant la différence entre\nnos cluster trouvés experimentalement (couleur) et nos clusters hypothétiques (formes)', x = '', y = '') + 
+  theme_minimal() + 
+  scale_shape_manual(values = c('0' = 0, '1' = 1, '2' = 2), name = 'Cluster hypothétiques', labels = c('float windows', 'non float windows', 'others')) +
+  scale_color_discrete(name = 'Cluster trouvés experimentalement', labels = c('cluster 1', 'cluster 2', 'cluster 3'))
+
+hypothesis_experiment_cmdscale
+
+ggsave('Hypothesis_experiment_cmdscale_cah_Fig7.png', plot = hypothesis_experiment_cmdscale, width = 12, height = 8)
+```
+
+```{r, fig.height=32, fig.width=16}
+require(reshape2)
+
+dfX2 <- dfX
+dfX2$class <- cmdscaledf$experiment
+dfX3 <- melt(dfX2 ,  id.vars = 'class', variable.name = 'series')
+bxplt <- ggplot(dfX3, aes(factor(class),value)) + geom_boxplot() + facet_grid(series ~ ., scales="free_y")+ ggtitle("Boxplot des variables selon le cluster")+ labs(x="Cluster")
+ggsave("BoxplotVarSelonCluster_Fig8.png", plot = bxplt, width = 13, height = 10)
+bxplt
+```
+
+## IV. Classification supervisée
+
+### IV.1 Arbre parfait sur les données d'entrainement - Overfitting
+
+```{r}
+train.index <- createDataPartition(df$class, p = .75, list = FALSE)
+train <- df[ train.index,]
+test  <- df[-train.index,]
+
+tree <- rpart(class~., data=train, control=rpart.control(minsplit = 1, cp = 0))
+plott <- prp(tree)
+save(plott, file = "ArbreOverfit_Fig9.png")
+
+training_error = 1 - (sum((train$class == predict(tree, train, type="class")), na.rm = TRUE) / nrow(train))
+generalisation_error = 1 - (sum((test$class == predict(tree, test, type="class")), na.rm = TRUE) / nrow(test))
+```
+
+### IV.2 Bootstrap
+
+```{r}
+df$class <- as.factor(df$class)
+
+bag <- bagging(
+  formula = df$class~.,
+   data = df,
+   nbagg = 100,  
+   coob = TRUE,
+   control = rpart.control(minsplit = 10, cp = 0)
+)
+
+#recherche du meilleur arbre, càd qui minimise l'erreur de prediction
+
+best_tree = bag$mtrees[[1]]
+res <- df$class == predict(bag$mtrees[[1]]$btree, df, type="class")
+best_score <- length(res[res == TRUE])
+
+for(k in 2:length(bag$mtrees)){
+  tree <- bag$mtrees[[k]]$btree
+  res <- df$class == predict(bag$mtrees[[k]]$btree, df, type="class")
+  nb_correct <- length(res[res == TRUE])
+  print(nb_correct)
+  
+  if(nb_correct>best_score){
+    best_score <- nb_correct
+    best_tree <- tree
+  }
+}
+
+best_score
+prp(best_tree)
+
+
+```
+
+```{r}
+tbl <- table(df$class, predict(best_tree, df, type="class"))
+error_by_class <- 1:6
+for (i in 1:6) {
+  error_by_class[i] = 1 - tbl[i, i]/sum(tbl[i,])
+}
+error_by_class
+```
+
+### IV.3 Comparaison avec d'autres travaux
+
+```{r}
+caret.control <- trainControl(method = "repeatedcv", number = 10, repeats = 5)
+paramGrid <- expand.grid(.cp = 0)
+cv <- train(class ~ ., 
+                  data = df,
+                  method = "treebag",
+                  trControl = caret.control)
+print(cv)
 ```
